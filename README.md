@@ -1,460 +1,196 @@
-# --- Step 1: Install Libraries ---
-!pip install pandas numpy scikit-learn matplotlib seaborn
-
-# --- Step 2: Import Libraries ---
+# --- Step 1: Import Libraries ---
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.exceptions import ConvergenceWarning
+import warnings
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import seaborn as sns
+import copy 
 
-# --- Step 3: Simulate Student Data ---
+# Ignore convergence warnings that often occur with small, personalized datasets
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
+# --- Step 2: Simulate Granular Student Data (Definitive Class Balance Fix) ---
 np.random.seed(42)
-students = ['S1','S2','S3','S4','S5']
-topics = ['Algebra','Geometry','Physics','Chemistry','Biology']
+students = ['S1','S2','S3','S4','S5','S6','S7','S8','S9','S10']
+topics = ['Algebra','Geometry','Physics','Chemistry']
+sessions = 20 # Increased sessions for more robust local training
 
 data = []
-for student in students:
+start_date = datetime.now()
+
+for i, student in enumerate(students):
+    # Significantly increased min learning rate and initial mastery for better success rates
+    learning_rate = np.random.uniform(0.20, 0.35) 
+    forget_rate = np.random.uniform(0.05, 0.30) 
+    
     for topic in topics:
-        score = np.random.randint(40,100)  # Random scores 40-100
-        time_spent = np.random.randint(20,60)  # Minutes spent
-        # NEW FEATURE: Include a difficulty level (1=Easy, 2=Medium, 3=Hard)
-        difficulty = np.random.choice([1, 2, 3])
-        data.append([student, topic, score, time_spent, difficulty])
+        mastery_level = np.random.uniform(0.6, 0.8) # Higher starting mastery
+        last_date = start_date
+        
+        for session in range(1, sessions + 1):
+            days_since_last = np.random.randint(1, 5)
+            date = last_date + timedelta(days=days_since_last)
+            last_date = date
+            
+            forget_factor = np.exp(-forget_rate * days_since_last / 10) 
+            score_base = mastery_level * 100 * forget_factor
+            score = int(np.clip(score_base + np.random.randint(-15, 15), 40, 100))
+            
+            # Increased impact of success/failure on mastery level
+            if score >= 75: mastery_level = min(1.0, mastery_level + learning_rate * 0.7)
+            elif score < 60: mastery_level = max(0.1, mastery_level - learning_rate * 0.2)
+            
+            data.append([student, topic, date, session, score, mastery_level, days_since_last, learning_rate, forget_rate])
 
-df = pd.DataFrame(data, columns=['StudentID','Topic','Score','TimeSpent', 'Difficulty'])
+df = pd.DataFrame(data, columns=['StudentID','Topic','Date','Session','Score','LatentMastery','DaysSinceLast','LearningRate','ForgettingRate'])
 
-# Encode topic for ML
+# The definitive fix: Lower the threshold to 60 for the 'Correct' label to ensure class variety
+df['Correct'] = (df['Score'] >= 60).astype(int) 
+
 df['Topic_encoded'] = df['Topic'].astype('category').cat.codes
-
-# Define performance: Weak=0 (<60), Medium=1 (60-79), Strong=2 (80+)
-df['Performance'] = df['Score'].apply(lambda x: 0 if x<60 else (1 if x<80 else 2))
-print("Sample Data:")
-print(df.head())
-
-# --- Step 4: Split Features and Labels (Now including Difficulty) ---
-X = df[['Topic_encoded','TimeSpent', 'Difficulty']] # Added 'Difficulty' as a feature
-y = df['Performance']
-
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-
-# --- Step 5: Train Random Forest Model ---
-model = RandomForestClassifier(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)
-
-# Evaluate
-y_pred = model.predict(X_test)
-print("\n--- Model Evaluation ---")
-print("Accuracy:", accuracy_score(y_test, y_pred))
-print(classification_report(y_test, y_pred))
-
-# --- Step 6: Predict Weak Topics for a New Student ---
-# Simulate a new student's study time per topic and current difficulty
-new_student_data = pd.DataFrame({
-    'Topic_encoded': [0, 1, 2, 3, 4],  # Algebra, Geometry, Physics, Chemistry, Biology
-    'TimeSpent': [25, 35, 30, 20, 40],
-    'Difficulty': [2, 1, 3, 2, 1] # Current assumed difficulty level for the student
-})
-new_student_topics = ['Algebra', 'Geometry', 'Physics', 'Chemistry', 'Biology']
-
-pred = model.predict(new_student_data)
-# NEW FEATURE: Predict the probability distribution (confidence)
-pred_proba = model.predict_proba(new_student_data)
-
-pred_labels = ['Weak','Medium','Strong']
-pred_text = [pred_labels[i] for i in pred]
-print("\n--- Predicted Performance ---")
-print("Predicted performance per topic:", pred_text)
+topic_mapping = df[['Topic_encoded', 'Topic']].drop_duplicates().set_index('Topic_encoded')['Topic'].to_dict()
+FEATURE_COLS = ['Topic_encoded', 'DaysSinceLast'] 
+TARGET_COL = 'Correct'
 
 # ----------------------------------------------------------------------
-# --- NEW FEATURE 1: Confidence Score & Adaptive Difficulty ---
+# --- STEP 3: FEDERATED LEARNING SIMULATION (Global & Local Training) ---
 # ----------------------------------------------------------------------
 
-print("\n--- AI Confidence & Next Steps ---")
-difficulty_map = {1: 'Easy', 2: 'Medium', 3: 'Hard'}
+# 3.1. Train the GLOBAL Model (Central Server)
+print("--- 1. Training Global Model (Federated Average) ---")
+X_global = df[FEATURE_COLS]
+y_global = df[TARGET_COL]
 
-for i, topic in enumerate(new_student_topics):
-    confidence = np.max(pred_proba[i]) * 100
-    current_diff = new_student_data.loc[i, 'Difficulty']
+# Safety check: If the simulation still resulted in a single class, force one '1' label
+if len(y_global.unique()) < 2:
+    print("\n🚨 WARNING: Global target still has only one class. Forcing one '1' label for training stability.")
+    # Find the index of the first '0' and change its label to '1'
+    idx_to_change = y_global[y_global == 0].index[0]
+    df.loc[idx_to_change, 'Correct'] = 1
+    y_global = df[TARGET_COL] # Re-fetch the corrected target series
 
-    # Adaptive Difficulty Logic
-    next_action = ""
-    if pred[i] == 2 and confidence > 80: # Strong and High Confidence
-        next_diff = min(current_diff + 1, 3) # Max difficulty is 3 (Hard)
-        next_action = f"Level Up! Recommended Difficulty: {difficulty_map[next_diff]}."
-    elif pred[i] == 0: # Weak
-        next_action = "Focus on basics."
-    else: # Medium or Strong but low confidence
-        next_action = f"Continue practice at current difficulty ({difficulty_map[current_diff]})."
+# Initialize Global Model (Increased max_iter for stability)
+global_model = LogisticRegression(solver='saga', max_iter=500, penalty='l2', random_state=42)
+global_model.fit(X_global, y_global)
+print(f"Global Model Trained. Accuracy on combined data (simulated): {global_model.score(X_global, y_global):.4f}")
 
-    print(f"| {topic}: Performance={pred_text[i]} | Confidence={confidence:.1f}% | Action: {next_action}")
+# 3.2. Initialize Local Models (Client Side)
+student_models = {}
+student_predictions = {}
+test_topic_encoded = df['Topic_encoded'].unique()
 
+print("\n--- 2. Personalizing Local Models (Fine-tuning Global Weights) ---")
 
-# ----------------------------------------------------------------------
-# --- NEW FEATURE 2: NLP-Based Dynamic Question Generator Function ---
-# (Carried over from the previous update)
-# ----------------------------------------------------------------------
-
-def generate_question(topic, difficulty_level):
-    """Generates a unique practice question based on topic and difficulty."""
+for student_id in students:
+    student_data = df[df['StudentID'] == student_id].copy()
     
-    templates = {
-        1: f"Easy: What is the primary function of a **{topic}** concept?",
-        2: f"Medium: Solve this typical **{topic}** problem: [X]",
-        3: f"Hard: Analyze and contrast two advanced principles of **{topic}** using a real-world scenario."
-    }
+    X_local = student_data[FEATURE_COLS]
+    y_local = student_data[TARGET_COL]
     
-    return templates.get(difficulty_level, f"Practice problem for {topic}: Review {difficulty_map[difficulty_level]}.")
+    # Check 1: Data Quantity
+    if len(student_data) < 10: 
+        print(f"Skipping {student_id} - Insufficient data.")
+        continue
 
+    # Check 2: Class Variety (CRUCIAL for local model training)
+    if len(y_local.unique()) < 2:
+        print(f"Skipping {student_id} - Insufficient class variety in local data (only class {y_local.iloc[0]}).")
+        continue
 
-# --- Step 7: Dynamic Question Recommendation ---
-print("\n--- Dynamic Question Recommendation for Weak/Medium Topics ---")
-
-for i, topic in enumerate(new_student_topics):
-    current_diff = new_student_data.loc[i, 'Difficulty']
+    # Create a local model instance
+    local_model = LogisticRegression(solver='saga', max_iter=500, penalty='l2', random_state=42)
     
-    if pred[i] == 0:  # Weak
-        # Suggest an easier question for a weak topic
-        recommended_diff = max(1, current_diff - 1)
-        question = generate_question(topic, recommended_diff)
-        print(f"🛑 Recommended for {topic} (Weak): Dynamic Question (Difficulty {recommended_diff}): {question}")
-    elif pred[i] == 1: # Medium
-        # Suggest a question at current difficulty
-        question = generate_question(topic, current_diff)
-        print(f"🔶 Recommended for {topic} (Medium): Dynamic Question (Difficulty {current_diff}): {question}")
-
-
-# ----------------------------------------------------------------------
-# --- NEW FEATURE 3: Gamification Metrics ---
-# ----------------------------------------------------------------------
-
-print("\n--- Gamification Metrics (Simulated) ---")
-student_xp = 5500
-current_level = int(student_xp / 1000)
-daily_streak = 7
-topic_mastery = {t: df[df['Topic'] == t]['Score'].mean() for t in topics}
-
-print(f"🌟 Student Level: {current_level} (XP: {student_xp})")
-print(f"🔥 Daily Streak: {daily_streak} days!")
-print("🏆 Topic Mastery Scores:")
-for t, score in topic_mastery.items():
-    badge = '🥇' if score >= 80 else ('🥈' if score >= 60 else '🥉')
-    print(f"  - {t}: {badge} {score:.1f}")
-
-
-# --- Step 8: Visualize Student Progress ---
-print("\n--- Student Performance Visualization ---")
-df_visual = df.pivot(index='StudentID', columns='Topic', values='Score')
-plt.figure(figsize=(10,6))
-sns.heatmap(df_visual, annot=True, cmap='YlGnBu', fmt="d", linewidths=.5, cbar_kws={'label': 'Score'})
-plt.title("Student Performance Heatmap (80+ is Strong)")
-plt.show()
-# --- Step 1: Install Libraries ---
-!pip install pandas numpy scikit-learn matplotlib seaborn
-
-# --- Step 2: Import Libraries ---
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# --- Step 3: Simulate Student Data ---
-np.random.seed(42)
-students = ['S1','S2','S3','S4','S5']
-topics = ['Algebra','Geometry','Physics','Chemistry','Biology']
-
-data = []
-for student in students:
-    for topic in topics:
-        score = np.random.randint(40,100)  # Random scores 40-100
-        time_spent = np.random.randint(20,60)  # Minutes spent
-        # NEW FEATURE: Include a difficulty level (1=Easy, 2=Medium, 3=Hard)
-        difficulty = np.random.choice([1, 2, 3])
-        data.append([student, topic, score, time_spent, difficulty])
-
-df = pd.DataFrame(data, columns=['StudentID','Topic','Score','TimeSpent', 'Difficulty'])
-
-# Encode topic for ML
-df['Topic_encoded'] = df['Topic'].astype('category').cat.codes
-
-# Define performance: Weak=0 (<60), Medium=1 (60-79), Strong=2 (80+)
-df['Performance'] = df['Score'].apply(lambda x: 0 if x<60 else (1 if x<80 else 2))
-print("Sample Data:")
-print(df.head())
-
-# --- Step 4: Split Features and Labels (Now including Difficulty) ---
-X = df[['Topic_encoded','TimeSpent', 'Difficulty']] # Added 'Difficulty' as a feature
-y = df['Performance']
-
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-
-# --- Step 5: Train Random Forest Model ---
-model = RandomForestClassifier(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)
-
-# Evaluate
-y_pred = model.predict(X_test)
-print("\n--- Model Evaluation ---")
-print("Accuracy:", accuracy_score(y_test, y_pred))
-print(classification_report(y_test, y_pred))
-
-# --- Step 6: Predict Weak Topics for a New Student ---
-# Simulate a new student's study time per topic and current difficulty
-new_student_data = pd.DataFrame({
-    'Topic_encoded': [0, 1, 2, 3, 4],  # Algebra, Geometry, Physics, Chemistry, Biology
-    'TimeSpent': [25, 35, 30, 20, 40],
-    'Difficulty': [2, 1, 3, 2, 1] # Current assumed difficulty level for the student
-})
-new_student_topics = ['Algebra', 'Geometry', 'Physics', 'Chemistry', 'Biology']
-
-pred = model.predict(new_student_data)
-# NEW FEATURE: Predict the probability distribution (confidence)
-pred_proba = model.predict_proba(new_student_data)
-
-pred_labels = ['Weak','Medium','Strong']
-pred_text = [pred_labels[i] for i in pred]
-print("\n--- Predicted Performance ---")
-print("Predicted performance per topic:", pred_text)
+    # Federated Personalization Step: Transfer Learning from Global Model
+    try:
+        # Dummy fit to initialize model attributes using a minimal set of data points with both classes
+        unique_data_indices = y_local.drop_duplicates().index
+        local_model.fit(X_local.loc[unique_data_indices], y_local.loc[unique_data_indices]) 
+        
+        # Copy Global Model weights as the starting point (PFL)
+        local_model.coef_ = copy.deepcopy(global_model.coef_)
+        local_model.intercept_ = copy.deepcopy(global_model.intercept_)
+        
+        # Fine-tune the local model on the student's personal data
+        local_model.fit(X_local, y_local)
+        student_models[student_id] = local_model
+        
+        # Predict probability of success (1)
+        X_test_future = pd.DataFrame({
+            'Topic_encoded': test_topic_encoded,
+            'DaysSinceLast': [5] * len(test_topic_encoded)
+        })
+        probs = local_model.predict_proba(X_test_future)[:, 1] 
+        topic_names = [topic_mapping[t] for t in test_topic_encoded]
+        student_predictions[student_id] = pd.Series(probs, index=topic_names)
+        
+    except Exception as e:
+        print(f"Error fine-tuning model for {student_id}: {e}")
 
 # ----------------------------------------------------------------------
-# --- NEW FEATURE 1: Confidence Score & Adaptive Difficulty ---
+# --- STEP 4: ADAPTIVE RECOMMENDATION (Actionable Insights) ---
 # ----------------------------------------------------------------------
 
-print("\n--- AI Confidence & Next Steps ---")
-difficulty_map = {1: 'Easy', 2: 'Medium', 3: 'Hard'}
-
-for i, topic in enumerate(new_student_topics):
-    confidence = np.max(pred_proba[i]) * 100
-    current_diff = new_student_data.loc[i, 'Difficulty']
-
-    # Adaptive Difficulty Logic
-    next_action = ""
-    if pred[i] == 2 and confidence > 80: # Strong and High Confidence
-        next_diff = min(current_diff + 1, 3) # Max difficulty is 3 (Hard)
-        next_action = f"Level Up! Recommended Difficulty: {difficulty_map[next_diff]}."
-    elif pred[i] == 0: # Weak
-        next_action = "Focus on basics."
-    else: # Medium or Strong but low confidence
-        next_action = f"Continue practice at current difficulty ({difficulty_map[current_diff]})."
-
-    print(f"| {topic}: Performance={pred_text[i]} | Confidence={confidence:.1f}% | Action: {next_action}")
-
-
-# ----------------------------------------------------------------------
-# --- NEW FEATURE 2: NLP-Based Dynamic Question Generator Function ---
-# (Carried over from the previous update)
-# ----------------------------------------------------------------------
-
-def generate_question(topic, difficulty_level):
-    """Generates a unique practice question based on topic and difficulty."""
+def adaptive_recommendation(student_id):
+    if student_id not in student_predictions:
+        print(f"\n--- Personalized Profile & Action for Student {student_id} ---\nModel not trained or failed to train due to data constraints.")
+        return 
     
-    templates = {
-        1: f"Easy: What is the primary function of a **{topic}** concept?",
-        2: f"Medium: Solve this typical **{topic}** problem: [X]",
-        3: f"Hard: Analyze and contrast two advanced principles of **{topic}** using a real-world scenario."
-    }
+    preds = student_predictions[student_id]
+    latest_data = df[df['StudentID'] == student_id].drop_duplicates('Topic', keep='last').set_index('Topic')
+    latest_mastery = latest_data['LatentMastery']
+    forget_rate = latest_data['ForgettingRate'].iloc[0]
     
-    return templates.get(difficulty_level, f"Practice problem for {topic}: Review {difficulty_map[difficulty_level]}.")
-
-
-# --- Step 7: Dynamic Question Recommendation ---
-print("\n--- Dynamic Question Recommendation for Weak/Medium Topics ---")
-
-for i, topic in enumerate(new_student_topics):
-    current_diff = new_student_data.loc[i, 'Difficulty']
+    # Identify Weakest/Strongest based on the FINE-TUNED model prediction
+    weakest_topic = preds.idxmin()
+    weakest_prob = preds.min()
+    strongest_topic = preds.idxmax()
     
-    if pred[i] == 0:  # Weak
-        # Suggest an easier question for a weak topic
-        recommended_diff = max(1, current_diff - 1)
-        question = generate_question(topic, recommended_diff)
-        print(f"🛑 Recommended for {topic} (Weak): Dynamic Question (Difficulty {recommended_diff}): {question}")
-    elif pred[i] == 1: # Medium
-        # Suggest a question at current difficulty
-        question = generate_question(topic, current_diff)
-        print(f"🔶 Recommended for {topic} (Medium): Dynamic Question (Difficulty {current_diff}): {question}")
+    # Calculate Personalized Review Days (Spaced Repetition based on personalized forgetting rate)
+    base_days = 7
+    review_days = int(np.clip(base_days + (1/forget_rate) * 2, 5, 25)) 
+    review_date = datetime.now() + timedelta(days=review_days)
 
-
-# ----------------------------------------------------------------------
-# --- NEW FEATURE 3: Gamification Metrics ---
-# ----------------------------------------------------------------------
-
-print("\n--- Gamification Metrics (Simulated) ---")
-student_xp = 5500
-current_level = int(student_xp / 1000)
-daily_streak = 7
-topic_mastery = {t: df[df['Topic'] == t]['Score'].mean() for t in topics}
-
-print(f"🌟 Student Level: {current_level} (XP: {student_xp})")
-print(f"🔥 Daily Streak: {daily_streak} days!")
-print("🏆 Topic Mastery Scores:")
-for t, score in topic_mastery.items():
-    badge = '🥇' if score >= 80 else ('🥈' if score >= 60 else '🥉')
-    print(f"  - {t}: {badge} {score:.1f}")
-
-
-# --- Step 8: Visualize Student Progress ---
-print("\n--- Student Performance Visualization ---")
-df_visual = df.pivot(index='StudentID', columns='Topic', values='Score')
-plt.figure(figsize=(10,6))
-sns.heatmap(df_visual, annot=True, cmap='YlGnBu', fmt="d", linewidths=.5, cbar_kws={'label': 'Score'})
-plt.title("Student Performance Heatmap (80+ is Strong)")
-plt.show()
-# --- Step 1: Install Libraries ---
-!pip install pandas numpy scikit-learn matplotlib seaborn
-
-# --- Step 2: Import Libraries ---
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# --- Step 3: Simulate Student Data ---
-np.random.seed(42)
-students = ['S1','S2','S3','S4','S5']
-topics = ['Algebra','Geometry','Physics','Chemistry','Biology']
-
-data = []
-for student in students:
-    for topic in topics:
-        score = np.random.randint(40,100)  # Random scores 40-100
-        time_spent = np.random.randint(20,60)  # Minutes spent
-        # NEW FEATURE: Include a difficulty level (1=Easy, 2=Medium, 3=Hard)
-        difficulty = np.random.choice([1, 2, 3])
-        data.append([student, topic, score, time_spent, difficulty])
-
-df = pd.DataFrame(data, columns=['StudentID','Topic','Score','TimeSpent', 'Difficulty'])
-
-# Encode topic for ML
-df['Topic_encoded'] = df['Topic'].astype('category').cat.codes
-
-# Define performance: Weak=0 (<60), Medium=1 (60-79), Strong=2 (80+)
-df['Performance'] = df['Score'].apply(lambda x: 0 if x<60 else (1 if x<80 else 2))
-print("Sample Data:")
-print(df.head())
-
-# --- Step 4: Split Features and Labels (Now including Difficulty) ---
-X = df[['Topic_encoded','TimeSpent', 'Difficulty']] # Added 'Difficulty' as a feature
-y = df['Performance']
-
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-
-# --- Step 5: Train Random Forest Model ---
-model = RandomForestClassifier(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)
-
-# Evaluate
-y_pred = model.predict(X_test)
-print("\n--- Model Evaluation ---")
-print("Accuracy:", accuracy_score(y_test, y_pred))
-print(classification_report(y_test, y_pred))
-
-# --- Step 6: Predict Weak Topics for a New Student ---
-# Simulate a new student's study time per topic and current difficulty
-new_student_data = pd.DataFrame({
-    'Topic_encoded': [0, 1, 2, 3, 4],  # Algebra, Geometry, Physics, Chemistry, Biology
-    'TimeSpent': [25, 35, 30, 20, 40],
-    'Difficulty': [2, 1, 3, 2, 1] # Current assumed difficulty level for the student
-})
-new_student_topics = ['Algebra', 'Geometry', 'Physics', 'Chemistry', 'Biology']
-
-pred = model.predict(new_student_data)
-# NEW FEATURE: Predict the probability distribution (confidence)
-pred_proba = model.predict_proba(new_student_data)
-
-pred_labels = ['Weak','Medium','Strong']
-pred_text = [pred_labels[i] for i in pred]
-print("\n--- Predicted Performance ---")
-print("Predicted performance per topic:", pred_text)
-
-# ----------------------------------------------------------------------
-# --- NEW FEATURE 1: Confidence Score & Adaptive Difficulty ---
-# ----------------------------------------------------------------------
-
-print("\n--- AI Confidence & Next Steps ---")
-difficulty_map = {1: 'Easy', 2: 'Medium', 3: 'Hard'}
-
-for i, topic in enumerate(new_student_topics):
-    confidence = np.max(pred_proba[i]) * 100
-    current_diff = new_student_data.loc[i, 'Difficulty']
-
-    # Adaptive Difficulty Logic
-    next_action = ""
-    if pred[i] == 2 and confidence > 80: # Strong and High Confidence
-        next_diff = min(current_diff + 1, 3) # Max difficulty is 3 (Hard)
-        next_action = f"Level Up! Recommended Difficulty: {difficulty_map[next_diff]}."
-    elif pred[i] == 0: # Weak
-        next_action = "Focus on basics."
-    else: # Medium or Strong but low confidence
-        next_action = f"Continue practice at current difficulty ({difficulty_map[current_diff]})."
-
-    print(f"| {topic}: Performance={pred_text[i]} | Confidence={confidence:.1f}% | Action: {next_action}")
-
-
-# ----------------------------------------------------------------------
-# --- NEW FEATURE 2: NLP-Based Dynamic Question Generator Function ---
-# (Carried over from the previous update)
-# ----------------------------------------------------------------------
-
-def generate_question(topic, difficulty_level):
-    """Generates a unique practice question based on topic and difficulty."""
+    # --- Action Logic ---
+    action_1 = f"**{weakest_topic}** (Predicted Success: {weakest_prob:.2f}). **Action:** Immediate Remediation. The **PFL** model suggests this is the highest risk topic, recommend a pre-requisite review."
     
-    templates = {
-        1: f"Easy: What is the primary function of a **{topic}** concept?",
-        2: f"Medium: Solve this typical **{topic}** problem: [X]",
-        3: f"Hard: Analyze and contrast two advanced principles of **{topic}** using a real-world scenario."
-    }
+    action_2 = f"**{strongest_topic}** (Mastery: {latest_mastery.loc[strongest_topic]:.2f}). **Action:** Dynamic Challenge. Schedule a higher-order application problem. Next review in **{review_days} days** based on personalized forgetting."
+
+    print(f"\n--- Personalized Profile & Action for Student {student_id} (PFL Driven) ---")
+    print(f"| Student Trait: Forgetting Rate (Personalized): {forget_rate:.2f}")
+    print("----------------------------------------------------------------------")
+    print(f"🔥 Weakest Link Prediction (Based on **Fine-Tuned Local Model**): {action_1}")
+    print(f"🧠 Strongest Area Recommendation (Spaced Repetition): {action_2}")
     
-    return templates.get(difficulty_level, f"Practice problem for {topic}: Review {difficulty_map[difficulty_level]}.")
-
-
-# --- Step 7: Dynamic Question Recommendation ---
-print("\n--- Dynamic Question Recommendation for Weak/Medium Topics ---")
-
-for i, topic in enumerate(new_student_topics):
-    current_diff = new_student_data.loc[i, 'Difficulty']
-    
-    if pred[i] == 0:  # Weak
-        # Suggest an easier question for a weak topic
-        recommended_diff = max(1, current_diff - 1)
-        question = generate_question(topic, recommended_diff)
-        print(f"🛑 Recommended for {topic} (Weak): Dynamic Question (Difficulty {recommended_diff}): {question}")
-    elif pred[i] == 1: # Medium
-        # Suggest a question at current difficulty
-        question = generate_question(topic, current_diff)
-        print(f"🔶 Recommended for {topic} (Medium): Dynamic Question (Difficulty {current_diff}): {question}")
-
+# --- STEP 5: Run the PFL System for Example Students ---
+adaptive_recommendation('S5')
+adaptive_recommendation('S10')
 
 # ----------------------------------------------------------------------
-# --- NEW FEATURE 3: Gamification Metrics ---
+# --- STEP 6: Visualization: Comparing Global vs. Local Model Weights ---
 # ----------------------------------------------------------------------
+print("\n--- Model Interpretability: Global vs. Personalized Weights ---")
 
-print("\n--- Gamification Metrics (Simulated) ---")
-student_xp = 5500
-current_level = int(student_xp / 1000)
-daily_streak = 7
-topic_mastery = {t: df[df['Topic'] == t]['Score'].mean() for t in topics}
+# Get coefficients for the Global Model
+global_weights = pd.Series(global_model.coef_[0], index=FEATURE_COLS)
 
-print(f"🌟 Student Level: {current_level} (XP: {student_xp})")
-print(f"🔥 Daily Streak: {daily_streak} days!")
-print("🏆 Topic Mastery Scores:")
-for t, score in topic_mastery.items():
-    badge = '🥇' if score >= 80 else ('🥈' if score >= 60 else '🥉')
-    print(f"  - {t}: {badge} {score:.1f}")
-
-
-# --- Step 8: Visualize Student Progress ---
-print("\n--- Student Performance Visualization ---")
-df_visual = df.pivot(index='StudentID', columns='Topic', values='Score')
-plt.figure(figsize=(10,6))
-sns.heatmap(df_visual, annot=True, cmap='YlGnBu', fmt="d", linewidths=.5, cbar_kws={'label': 'Score'})
-plt.title("Student Performance Heatmap (80+ is Strong)")
-plt.show()
-# EDUMIND
+# Get coefficients for one Local Model (e.g., S5)
+if 'S5' in student_models:
+    local_weights = pd.Series(student_models['S5'].coef_[0], index=FEATURE_COLS)
+    
+    weight_df = pd.DataFrame({
+        'Global Model': global_weights,
+        'S5 Local Model': local_weights
+    })
+    
+    plt.figure(figsize=(8, 5))
+    weight_df.plot(kind='bar')
+    plt.title("Comparison of Feature Weights (Global vs. Student S5)")
+    plt.ylabel("Model Coefficient Value")
+    plt.xticks(rotation=0)
+    plt.grid(axis='y')
+    plt.show()
+else:
+    print("Could not compare weights (S5 model not trained).")
